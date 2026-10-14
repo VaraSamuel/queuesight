@@ -24,7 +24,7 @@ class TabularModel:
         self.X = features.to_numpy(np.float64)
         self.feature_names = list(features.columns)
 
-    def fit(self, idx: np.ndarray, y: np.ndarray) -> "TabularModel":
+    def fit(self, idx: np.ndarray, y: np.ndarray) -> TabularModel:
         self.est.fit(self.X[idx], y)
         return self
 
@@ -99,7 +99,7 @@ class DeepLOBLite:
 
         return Net()
 
-    def fit(self, idx: np.ndarray, y: np.ndarray) -> "DeepLOBLite":
+    def fit(self, idx: np.ndarray, y: np.ndarray) -> DeepLOBLite:
         torch = self.torch
         torch.manual_seed(self.seed)
         rng = np.random.default_rng(self.seed)

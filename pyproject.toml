@@ -3,7 +3,7 @@ name = "queuesight"
 version = "0.1.0"
 description = "Conformal-gated limit order book forecasting with an execution-aware backtest"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "pandas>=2.0", "scikit-learn>=1.3", "plotly>=5.18"]
+dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10", "scikit-learn>=1.3", "plotly>=5.18"]
 
 [project.optional-dependencies]
 app = ["streamlit>=1.40"]
@@ -16,3 +16,11 @@ packages = ["queuesight"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore::UserWarning"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "NPY"]
+ignore = ["E731"]

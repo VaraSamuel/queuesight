@@ -42,7 +42,7 @@ class SplitConformal:
     alpha: float = 0.1
     mondrian: bool = False  # class-conditional coverage (one quantile per class)
 
-    def fit(self, probs_cal: np.ndarray, y_cal: np.ndarray) -> "SplitConformal":
+    def fit(self, probs_cal: np.ndarray, y_cal: np.ndarray) -> SplitConformal:
         s = nonconformity(probs_cal, y_cal)
         if self.mondrian:
             self.qhat = np.array([conformal_quantile(np.sort(s[y_cal == c]), self.alpha)

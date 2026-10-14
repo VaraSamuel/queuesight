@@ -44,7 +44,7 @@ class LOBData:
         """Aggressor-signed traded volume per event (+ = buyer initiated)."""
         return np.where(self.event_type == 2, self.event_side * self.event_size, 0.0)
 
-    def slice(self, start: int, stop: int) -> "LOBData":
+    def slice(self, start: int, stop: int) -> LOBData:
         s = slice(start, stop)
         return LOBData(
             self.time[s], self.ask_px[s], self.ask_sz[s], self.bid_px[s], self.bid_sz[s],
