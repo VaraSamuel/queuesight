@@ -1,0 +1,19 @@
+{
+  "config": {
+    "events": 300000,
+    "horizon": 200,
+    "alpha": 0.25,
+    "latency": 1,
+    "fee_ticks": 0.0,
+    "seed": 7
+  },
+  "best_model": "Logistic (OFI)",
+  "regime_recovery": {
+    "corr": 0.5579847980655738,
+    "mean_score_by_regime": {
+      "-1": -0.3383082411444189,
+      "0": 0.047766605810906,
+      "1": 0.36841380220184583
+    }
+  }
+}
