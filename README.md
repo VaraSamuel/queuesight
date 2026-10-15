@@ -1,206 +1,208 @@
-# QueueSight
+# queuesight
 
-**Conformal-gated limit order book forecasting, with execution-aware evaluation.**
+[![ci](https://github.com/VaraSamuel/queuesight/actions/workflows/ci.yml/badge.svg)](https://github.com/VaraSamuel/queuesight/actions/workflows/ci.yml)
 
-Most LOB deep-learning projects report one number, classification accuracy on
-FI-2010-style labels, and stop. That number is close to meaningless for a
-trading desk. QueueSight asks the question a desk actually asks:
+Mid-price forecasting on a limit order book, evaluated the way a desk would:
+after crossing the spread, with latency, and with a statistical guarantee on
+how often the trades it takes lose money.
 
-> *When the model says "up", how sure is it, and does that conviction survive
-> crossing the spread, paying fees, and arriving late?*
+Most LOB forecasting work (DeepLOB, TransLOB, the FI-2010 benchmark) reports
+classification accuracy. I wanted to know whether that accuracy is tradable,
+and whether you can put a bound on the risk of acting on it. So this repo does
+three things:
 
-It answers with three pieces:
+1. **Simulates a book with a hidden informed trader.** Queue-reactive arrivals
+   (cancellations scale with resting depth), plus a latent Markov regime that
+   tilts aggressive flow, passive placement and cancels. Models never see the
+   regime, so any edge has to come from inferring it out of order flow. Because
+   the simulator does know it, I can check whether they did.
+2. **Forecasts direction over the next *h* events** with three models behind
+   one interface: logistic regression on multi-level OFI, gradient-boosted
+   trees on 24 microstructure features, and a small conv + GRU on raw
+   snapshots (DeepLOB-style, optional).
+3. **Decides when to trade using distribution-free methods:**
+   - **Learn then Test** (Angelopoulos et al. 2021). It picks a conviction
+     threshold such that, with probability at least 1 − δ, the share of trades
+     that lose money after costs is at most a target you choose.
+   - **Conformal prediction sets.** Trade only if the set is exactly `{up}` or
+     `{down}`. There's a split version, a class-conditional (Mondrian) version,
+     and **adaptive conformal inference with delayed labels**, because a
+     horizon-*h* outcome is only known *h* events later and the online update
+     has to respect that.
 
-1. **A queue-reactive order book simulator with a hidden informed trader.** A
-   latent Markov regime tilts aggressive flow, passive placement and
-   cancellations, much as an informed participant would. Any edge a model finds
-   has to come from *inferring* that regime out of order flow, and because the
-   simulator knows the ground truth, we can check whether the model did.
-2. **Three forecasters behind one interface:** logistic regression on
-   multi-level order flow imbalance (OFI), gradient-boosted trees on 24 microstructure
-   features, and a DeepLOB-style conv+GRU on raw book snapshots.
-3. **Conformal trade gating.** Any forecaster becomes a prediction-set
-   generator with a finite-sample coverage guarantee. We trade **only when the
-   set is exactly `{up}` or `{down}`** and abstain otherwise. α stops being an
-   arbitrary confidence cutoff and becomes a *risk budget with statistical
-   meaning*. Because order flow is non-stationary, we also run **Adaptive
-   Conformal Inference with delayed labels**: a horizon-*h* forecast's outcome
-   is only known *h* events later, and the online update respects that.
+The backtest buys at the ask and sells at the bid, fills *L* events after the
+signal, and never holds overlapping positions.
 
-Everything is judged by an **execution-aware backtest**. You buy at the ask, sell
-at the bid, fill *L* events after the signal, and never hold overlapping positions.
+![order book](docs/book.png)
 
-![Order book liquidity heatmap](docs/book.png)
+## Results
 
----
+Means ± sd over 8 independently simulated markets (600k events each,
+h = 200 events, 1 event latency, no fees, gradient boosting). Reproduce with
+`python -m queuesight.robustness`. Raw per-seed numbers are in
+[`results/`](results/). The charts are from a single run (seed 7, the
+`python -m queuesight.report` default), which happens to be the LTT gate's
+worst seed. I left it that way rather than picking a nicer one.
 
-## Findings (300k events, seed 7; reproducible with `python -m queuesight.report`)
+### Accuracy is not edge
 
-### 1. Accuracy is not edge
+| horizon | accuracy | net PnL per trade, always trading (ticks) |
+|---:|---:|---:|
+| 10 events | 80.1% ± 0.7% | -2.64 ± 0.20 |
+| 50 events | 66.2% ± 0.8% | -1.02 ± 0.08 |
+| 200 events | 61.3% ± 1.4% | +0.81 ± 0.16 |
 
-| horizon | accuracy | majority baseline | directional precision | net PnL / trade (ticks) |
-|---:|---:|---:|---:|---:|
-| 10 events  | **79.4%** | 73.5% | 49.1% | **−2.45** |
-| 50 events  | 66.1% | 56.5% | 54.9% | −1.14 |
-| 200 events | 57.2% | 31.2% | **61.8%** | **+0.70** |
+At 10 events the mid usually doesn't move, so the model gets its accuracy by
+predicting "flat", and its directional calls barely beat a coin flip. Every
+one of those calls pays the spread. The edge only shows up once the expected
+move is bigger than the round-trip cost.
 
-The *most accurate* model is the *worst* strategy. At short horizons the mid
-rarely moves, so the model wins accuracy by predicting "flat". When it does
-call a direction it is no better than a coin flip, and every trade pays the
-spread. Edge only shows up where expected moves exceed transaction costs.
+![horizon](docs/horizon.png)
 
-![Accuracy vs tradability](docs/horizon.png)
+### The model finds the hidden regime
 
-### 2. The model recovers a regime it never observes
+P(up) − P(down) tracks the informed trader's state without ever being shown
+it (correlation 0.61 in the run below).
 
-P(up) − P(down) correlates **≈0.5** with the hidden informed-trader state.
-The classifier has effectively learned to filter a latent variable out of order
-flow imbalance, microprice and cancellation asymmetry.
+![regime](docs/regime.png)
 
-![Regime recovery](docs/regime.png)
+### Bounding the losing-trade rate
 
-### 3. Coverage holds, and adaptive conformal holds it *through regime shifts*
+Target: at most 40% of trades lose money, with δ = 0.10.
 
-Target coverage 1 − α = 0.75 on an unseen test window:
+| | |
+|---|---:|
+| seeds where LTT certified a threshold | 8 / 8 |
+| seeds where it beat always-trading / the confidence gate | 7 / 8, 7 / 8 |
+| realized losing-trade rate on test | 27.7% ± 4.1% |
+| seeds where the bound held out of sample | 8 / 8 |
+| net PnL per trade | +1.44 ± 0.39 |
 
-| method | coverage | avg set size | singleton rate |
-|---|---:|---:|---:|
-| Split conformal | 0.733 | 1.40 | 61% |
-| Mondrian (class-conditional) | 0.733 | 1.40 | 60% |
-| **Adaptive (ACI, delayed labels)** | **0.749** | 1.75 | 41% |
+How it works: each candidate threshold (top 5%, 10%, ... 60% of decisions
+by conviction) is a one-sided binomial test of "loss rate > target".
+Calibration outcomes are thinned to one per horizon so they don't overlap,
+and the tests are Bonferroni-corrected. The gate uses the loosest threshold
+that passes, and if none pass it doesn't trade.
 
-Split conformal undershoots because the test window's regime mix differs from
-the calibration window (exchangeability is violated, as it always is in
-markets). ACI widens its sets when it starts missing and recovers the target.
+The thinning is what keeps the guarantee honest, but it's expensive: 120k
+calibration events become ~600 usable samples. At 300k events the gate
+couldn't certify anything on 3 of 8 seeds. Doubling the data fixed that.
 
-![Rolling coverage](docs/coverage.png)
+![ltt](docs/ltt.png)
 
-### 4. Trading the sets (h = 200, latency 1 event, no fees; model = logistic, picked on calibration log-loss)
+### Trading the gates
 
-| strategy | trades | hit rate | net PnL / trade (ticks) |
-|---|---:|---:|---:|
-| Always trade argmax | 271 | 36.9% | +1.08 |
-| Confidence gate (τ matched to same trade rate) | 239 | 38.1% | +1.13 |
-| Conformal gate (α = 0.25) | 232 | 43.1% | +1.62 |
-| Adaptive conformal gate | 172 | 43.6% | +1.67 |
-
-Sweeping α traces a selectivity frontier: lower α, fewer trades, more edge per
-trade (≈ +2.3 ticks at α = 0.05). On *this* path the conformal gate looks
-clearly better than the confidence gate. **Section 5 shows that this does not
-generalise**, which is exactly why the section exists.
-
-![Selectivity frontier](docs/frontier.png)
-![Equity curves](docs/equity.png)
-
-### 5. Robustness across 8 independent market paths
-
-`python -m queuesight.robustness --seeds 8` (gradient boosting, h = 200, α = 0.25):
-
-| metric | mean ± sd over 8 seeds | min / max |
+| strategy | trades | net PnL per trade (ticks) |
 |---|---:|---:|
-| accuracy, h = 10 | 79.4% ± 1.1 | 78.0 / 81.1 |
-| net PnL / trade, argmax, h = 10 | −2.52 ± 0.19 | −2.90 / −2.32 |
-| accuracy, h = 200 | 58.9% ± 1.8 | 56.7 / 61.9 |
-| net PnL / trade, argmax, h = 200 | +0.64 ± 0.21 | +0.30 / +0.91 |
-| net PnL / trade, confidence gate (matched rate) | +0.85 ± 0.19 | +0.56 / +1.13 |
-| net PnL / trade, conformal gate | +0.79 ± 0.25 | +0.33 / +1.05 |
-| net PnL / trade, adaptive conformal gate | **+0.96 ± 0.25** | +0.70 / +1.37 |
-| \|coverage − 0.75\|, split conformal | 0.014 ± 0.015 | 0.000 / 0.042 |
-| \|coverage − 0.75\|, adaptive conformal | **0.001 ± 0.000** | 0.000 / 0.001 |
+| always trade the argmax | 560 | +0.81 ± 0.16 |
+| confidence threshold (τ tuned to the conformal gate's trade rate) | 502 | +1.14 ± 0.21 |
+| conformal gate, α = 0.25 | 504 | +1.00 ± 0.21 |
+| adaptive conformal gate | 386 | +1.15 ± 0.19 |
+| Learn-then-Test gate | 456 | +1.44 ± 0.39 |
 
-**The honest read:**
+Coverage at a 0.75 target: split conformal misses by 0.009 (worst 0.021) on
+average; adaptive conformal misses by less than 0.001 on every seed.
 
-- **Robust:** the accuracy illusion (on every seed, the most accurate horizon
-  loses about 2.5 ticks per trade). Also robust: gating beats always trading,
-  and ACI's coverage guarantee survives regime shift (±0.001 of target on
-  every path, versus misses of up to 4 points for split conformal). The
-  adaptive gate beat argmax on 7 of 8 seeds.
-- **Not robust:** at a *matched trade rate*, the plain conformal gate does
-  **not** beat a tuned confidence threshold (−0.06 ± 0.12 ticks; better on
-  only 2 of 8 seeds). Under LAC scores, both gates rank trades by similar
-  information, and seed 7's gap was path luck.
-- **So the case for conformal is not "more PnL".** It is that α is a risk
-  budget with a *guarantee*. You choose it before seeing test data, it
-  means the same thing across models (logistic, trees, a neural net), and with
-  ACI it keeps meaning that when the market changes under you. A raw
-  confidence threshold has to be re-tuned per model and per regime, with no
-  statement about what it controls.
+![coverage](docs/coverage.png)
 
----
+What I take from this:
 
-## Quick start
+- Gating beats always trading. That part is robust.
+- At the *same* trade rate, a plain conformal gate is not better than a tuned
+  confidence threshold (-0.14 ± 0.08 ticks; better on
+  0/8 seeds). With LAC scores both rank trades by roughly the
+  same quantity. My first single-seed run said otherwise; it was luck.
+- The reason to use conformal and LTT anyway is what the threshold *means*.
+  α and the loss-rate target are chosen before seeing test data, mean the
+  same thing for any model, and (with ACI) keep meaning it through regime
+  shifts. A confidence cutoff has to be re-tuned for every model and regime,
+  and it doesn't say what it controls.
+- The LTT gate made the most per trade, beating both always-trading and the
+  confidence gate on 7 of 8 seeds. That's partly because the thing it
+  controls (losing trades after costs) is closer to PnL than label coverage
+  is. It's still a bound on losses, not a PnL optimiser: on seed 7 it traded
+  more than the others and trailed both.
+
+![frontier](docs/frontier.png)
+
+## Running it
 
 ```bash
 pip install -r requirements.txt
 
-streamlit run app.py                 # interactive dashboard
-python -m queuesight.report          # full run -> results/report.html (~1-2 min; --deep adds PyTorch)
-python -m queuesight.robustness      # multi-seed study -> results/robustness_*.csv
-pytest                               # 13 tests
+streamlit run app.py              # dashboard
+python -m queuesight.report       # one full run -> results/report.html  (--deep adds the PyTorch model)
+python -m queuesight.robustness   # 8-seed study -> results/robustness_*.csv
+pytest                            # 16 tests
 ```
 
-The dashboard caches the simulation and training. The α, latency and fee
-sliders re-run only the conformal and backtest layers, so they update instantly.
+The dashboard caches simulation and training. The α, loss-target, latency
+and fee sliders only re-run the gating and backtest, so they're instant.
 
 ### Real data
 
-`queuesight.book.load_lobster(message_csv, orderbook_csv)` maps
-[LOBSTER](https://lobsterdata.com) files into the same `LOBData` container the
-simulator emits, so the full pipeline runs unchanged on Nasdaq ITCH data:
+`queuesight.book.load_lobster` reads [LOBSTER](https://lobsterdata.com)
+message/orderbook pairs into the same container the simulator produces:
 
 ```python
 from queuesight.book import load_lobster
-from queuesight.pipeline import run_experiment, ExperimentConfig
+from queuesight.pipeline import ExperimentConfig, run_experiment
+
 res = run_experiment(ExperimentConfig(), data=load_lobster("AAPL_message_10.csv", "AAPL_orderbook_10.csv"))
 ```
+
+I haven't run it on LOBSTER yet. That's next.
 
 ## Layout
 
 ```
 queuesight/
-  simulator.py   queue-reactive LOB + hidden informed regime
-  book.py        LOBData container, LOBSTER loader
-  features.py    multi-level OFI, microprice, imbalance, trade/cancel flow; smoothed labels
-  models.py      logistic / gradient boosting / DeepLOB-lite, shared fit/predict_proba(idx)
-  conformal.py   split, Mondrian, delayed-label ACI; set -> trade gating
-  backtest.py    spread-crossing, latency, fees, non-overlapping positions
-  pipeline.py    chronological split with embargo, experiment + analyses
-  viz.py         Plotly figures shared by app and report
-  report.py      CLI -> standalone HTML report
-  robustness.py  multi-seed study
-app.py           Streamlit dashboard
-tests/           no-lookahead, book integrity, coverage guarantees, backtest accounting
+  simulator.py     queue-reactive book + hidden regime
+  book.py          LOBData container, LOBSTER loader
+  features.py      multi-level OFI, microprice, imbalance, trade/cancel flow, labels
+  models.py        logistic / boosting / DeepLOB-lite, fit(idx) + predict_proba(idx)
+  conformal.py     split, Mondrian, delayed-label ACI, set -> signal
+  risk_control.py  Learn-then-Test gate
+  backtest.py      spread crossing, latency, fees, no overlap
+  pipeline.py      chronological split with embargo, experiment + analyses
+  viz.py           plotly figures (shared by app and report)
+  report.py        HTML report CLI
+  robustness.py    multi-seed study
+app.py             streamlit dashboard
+tests/             look-ahead, book integrity, coverage, LTT guarantee, accounting
 ```
 
-## Methodological guardrails
+## Guardrails
 
-- **No look-ahead.** A test recomputes features on a truncated history and
-  checks that they are identical at the cut point.
-- **Chronological 60/20/20 split with an embargo** of max-horizon events
-  between train, calibration and test, so labels never straddle a boundary.
-- **Model selection on calibration log-loss**, never on test.
-- **Fair baselines.** The confidence-threshold gate's τ is chosen on the
-  calibration window to trade at the *same rate* as the conformal gate.
-- **Delayed feedback** in ACI: no error is used before its label could exist.
+- Features are checked for look-ahead: recomputing them on a truncated
+  history must give identical values at the cut.
+- Train / calibration / test is chronological (60/20/20) with an embargo of
+  one max-horizon between blocks, so no label straddles a boundary.
+- Model selection uses calibration log-loss, never test.
+- The confidence baseline is tuned to trade at the same rate as the conformal
+  gate.
+- ACI only learns from an error once that outcome could actually be known.
+- The LTT test in `tests/` repeats calibration 300 times on a world with a
+  known loss curve and checks the bound fails at most δ of the time.
 
 ## Limitations
 
-- The headline numbers come from a simulator. It is designed to be realistic
-  (one-tick spread 86% of the time, depth-reactive cancellation, informed flow
-  hidden in noise), but it is still a model of a market. Run it on LOBSTER
-  before believing any PnL.
-- Execution is aggressive-only (market in, market out). Passive entry with
-  queue-position modelling would change the economics substantially.
-- Each strategy makes a few hundred non-overlapping trades per path. That's
-  why the robustness study exists.
+- It's a simulator. It's tuned to look like a real book (one-tick spread
+  ~86% of the time, depth-reactive cancels, weak informed flow), but none of
+  the PnL numbers mean anything until this runs on real data.
+- Entry and exit are both aggressive. Passive fills with queue-position
+  modelling would change the economics a lot.
+- The LTT guarantee assumes calibration and test outcomes are exchangeable.
+  Regime shifts break that, which is why the realized loss rates are reported
+  rather than assumed.
 
 ## References
 
-- Cont, Kukanov & Stoikov (2014). *The price impact of order book events.*
-- Xu, Gould & Howison (2018). *Multi-level order-flow imbalance in a limit order book.*
-- Stoikov (2018). *The micro-price.*
-- Huang, Lehalle & Rosenbaum (2015). *Simulating and analyzing order book data: the queue-reactive model.*
-- Zhang, Zohren & Roberts (2019). *DeepLOB.*
-- Ntakaris et al. (2018). *Benchmark dataset for mid-price forecasting of LOB data* (FI-2010).
-- Angelopoulos & Bates (2021). *A gentle introduction to conformal prediction.*
-- Gibbs & Candès (2021). *Adaptive conformal inference under distribution shift.*
+- Cont, Kukanov, Stoikov (2014). The price impact of order book events.
+- Xu, Gould, Howison (2018). Multi-level order-flow imbalance in a limit order book.
+- Stoikov (2018). The micro-price.
+- Huang, Lehalle, Rosenbaum (2015). Simulating and analyzing order book data: the queue-reactive model.
+- Zhang, Zohren, Roberts (2019). DeepLOB.
+- Ntakaris et al. (2018). Benchmark dataset for mid-price forecasting of LOB data.
+- Angelopoulos, Bates, Candès, Jordan, Lei (2021). Learn then Test: calibrating predictive algorithms to achieve risk control.
+- Gibbs, Candès (2021). Adaptive conformal inference under distribution shift.

@@ -50,7 +50,7 @@ def run_backtest(d: LOBData, decision_idx: np.ndarray, signals: np.ndarray,
     T = len(d)
     entries, sides, net, frictionless = [], [], [], []
     busy_until = -1
-    for t, s in zip(decision_idx, signals):
+    for t, s in zip(decision_idx, signals, strict=True):
         if s == 0 or t <= busy_until:
             continue
         e, x = t + latency, t + latency + horizon
@@ -67,3 +67,20 @@ def run_backtest(d: LOBData, decision_idx: np.ndarray, signals: np.ndarray,
         busy_until = x
     return BacktestResult(np.array(entries, dtype=np.int64), np.array(sides, dtype=np.int8),
                           np.array(net, dtype=np.float64), np.array(frictionless, dtype=np.float64))
+
+
+def trade_outcomes(d: LOBData, idx: np.ndarray, horizon: int, latency: int = 0,
+                   fee_ticks: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """Net PnL (ticks) of a hypothetical long and short decided at each index.
+
+    Unlike `run_backtest` this ignores position overlap; it's what you need to
+    calibrate a gate on per-decision outcomes.
+    """
+    ask, bid = d.ask_px[:, 0] / d.tick, d.bid_px[:, 0] / d.tick
+    e = idx + latency
+    x = e + horizon
+    if x.max() >= len(d):
+        raise ValueError("horizon + latency runs past the end of the data")
+    long = bid[x] - ask[e] - 2 * fee_ticks
+    short = bid[e] - ask[x] - 2 * fee_ticks
+    return long, short

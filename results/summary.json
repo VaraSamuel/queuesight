@@ -1,19 +1,26 @@
 {
   "config": {
-    "events": 300000,
+    "events": 600000,
     "horizon": 200,
     "alpha": 0.25,
     "latency": 1,
     "fee_ticks": 0.0,
     "seed": 7
   },
-  "best_model": "Logistic (OFI)",
+  "best_model": "Gradient boosting",
   "regime_recovery": {
-    "corr": 0.5579847980655738,
+    "corr": 0.606671172900873,
     "mean_score_by_regime": {
-      "-1": -0.3383082411444189,
-      "0": 0.047766605810906,
-      "1": 0.36841380220184583
+      "-1": -0.44377962508992175,
+      "0": 0.011437826278002473,
+      "1": 0.38238981087222634
     }
+  },
+  "ltt": {
+    "target": 0.4,
+    "delta": 0.1,
+    "lambda": 0.42625040625220345,
+    "test_signal_rate": 0.5131497705465164,
+    "test_loss_rate": 0.34215703809694153
   }
 }

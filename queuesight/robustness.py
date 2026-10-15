@@ -11,11 +11,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .pipeline import ExperimentConfig, conformal_report, horizon_table, run_experiment, strategy_table
+from .pipeline import ExperimentConfig, conformal_report, horizon_table, ltt_report, run_experiment, strategy_table
 from .simulator import SimConfig
 
 STRATS = {"Always trade argmax": "argmax", "Confidence gate": "confidence",
-          "Conformal gate": "conformal", "Adaptive conformal gate": "aci"}
+          "Conformal gate": "conformal", "Adaptive conformal gate": "aci",
+          "Risk-controlled gate": "ltt"}
 
 
 def one_seed(seed: int, events: int, alpha: float) -> dict:
@@ -31,6 +32,9 @@ def one_seed(seed: int, events: int, alpha: float) -> dict:
         match = [i for i in st.index if i.startswith(name)]
         row[f"{key}_net"] = st.loc[match[0], "net_pnl_per_trade"]
         row[f"{key}_trades"] = st.loc[match[0], "trades"]
+    ltt = ltt_report(res, model)
+    row["ltt_test_loss_rate"] = ltt["test_loss_rate"]
+    row["ltt_guarantee_held"] = float(ltt["test_loss_rate"] <= ltt["target"]) if ltt["test_signal_rate"] > 0 else np.nan
     cov = conformal_report(res, model)
     row["split_cov"] = cov.iloc[0]["coverage"]
     row["mondrian_cov"] = cov.iloc[1]["coverage"]
@@ -61,6 +65,8 @@ def main(argv=None) -> None:
     pd.set_option("display.width", 200)
     print(agg.round(3))
     print(f"\nconformal > confidence in {(diff > 0).sum()}/{len(diff)} seeds")
+    print(f"LTT > argmax in {(df['ltt_net'] > df['argmax_net']).sum()}/{len(df)} seeds, "
+          f"> confidence gate in {(df['ltt_net'] > df['confidence_net']).sum()}/{len(df)}")
 
 
 if __name__ == "__main__":

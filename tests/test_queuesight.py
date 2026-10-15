@@ -146,3 +146,43 @@ def test_end_to_end_smoke():
     assert m.loc["Gradient boosting", "accuracy"] > m.loc["Class prior", "accuracy"]
     table = strategy_table(res)
     assert {"trades", "net_pnl_per_trade", "signal_rate"} <= set(table.columns)
+
+
+# ------------------------------------------------------------- risk control
+
+def _ltt_world(n, rng):
+    """Conviction u ~ U(0,1); a long loses w.p. 0.6 - 0.5u. True loss rate above λ is 0.35 - 0.25λ."""
+    u = rng.random(n)
+    probs = np.c_[(1 - u) / 3, (1 - u) / 3, u + (1 - u) / 3]
+    pnl = np.where(rng.random(n) < 0.6 - 0.5 * u, -1.0, 1.0)
+    return probs, pnl
+
+
+def test_ltt_guarantee_holds_at_rate_delta():
+    from queuesight.risk_control import LTTGate
+    rng = np.random.default_rng(0)
+    target, delta, violations, traded = 0.25, 0.1, 0, 0
+    for _ in range(300):
+        probs, pnl = _ltt_world(400, rng)
+        gate = LTTGate(target=target, delta=delta).fit(probs, pnl, -pnl, stride=1)
+        if np.isfinite(gate.lam):
+            traded += 1
+            violations += (0.35 - 0.25 * gate.lam) > target
+    assert traded > 100                       # it does find certifiable thresholds
+    assert violations / 300 <= delta          # and is wrong no more often than promised
+
+
+def test_ltt_abstains_when_nothing_is_certifiable():
+    from queuesight.risk_control import LTTGate
+    probs, pnl = _ltt_world(400, np.random.default_rng(1))
+    gate = LTTGate(target=0.05).fit(probs, pnl, -pnl, stride=1)
+    assert gate.lam == np.inf
+    assert (gate.signals(probs) == 0).all()
+
+
+def test_trade_outcomes_match_backtest_accounting():
+    from queuesight.backtest import trade_outcomes
+    d = _flat_book(T=50)
+    long, short = trade_outcomes(d, np.array([0, 10]), horizon=5, latency=1, fee_ticks=0.25)
+    np.testing.assert_allclose(long, [-2.5, -2.5])
+    np.testing.assert_allclose(short, [-2.5, -2.5])

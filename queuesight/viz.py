@@ -63,7 +63,7 @@ def book_heatmap(res: Results, start: int | None = None, n: int = 3000) -> go.Fi
                                  zmin=-1, zmax=1, showscale=False,
                                  colorscale=[[0, ORANGE], [0.5, "#d9d8d3"], [1, BLUE]],
                                  hovertemplate="regime %{z:+.0f}<extra></extra>"), 2, 1)
-    fig = _style(fig, "Order book liquidity (log size) — test period", 460)
+    fig = _style(fig, "Order book liquidity (log size), test period", 460)
     fig.update_layout(hovermode="closest", showlegend=False)
     fig.update_yaxes(title_text="price", row=1, col=1)
     return fig
@@ -93,7 +93,7 @@ def coverage_chart(report: pd.DataFrame, alpha: float) -> go.Figure:
     cols = ["coverage", "coverage_down", "coverage_flat", "coverage_up"]
     labels = ["overall", "down", "flat", "up"]
     fig = go.Figure()
-    for (name, row), color in zip(report.iterrows(), (BLUE, ORANGE, AQUA)):
+    for (name, row), color in zip(report.iterrows(), (BLUE, ORANGE, AQUA), strict=False):
         fig.add_trace(go.Bar(x=labels, y=row[cols].to_numpy(), name=name, marker_color=color))
     fig.add_hline(y=1 - alpha, line=dict(color=INK, width=1),
                   annotation_text=f"target 1-α = {1 - alpha:.2f}", annotation_position="top left")
@@ -155,7 +155,7 @@ def equity_chart(res: Results, model: str, alpha: float, latency: int, fee: floa
     fig.add_hline(y=0, line=dict(color=MUTED, width=1))
     fig.update_yaxes(title_text="cumulative net PnL (ticks)")
     fig.update_xaxes(title_text="event")
-    return _style(fig, "Equity curves — crossing the spread, non-overlapping trades", 380)
+    return _style(fig, "Equity curves: crossing the spread, no overlapping trades", 380)
 
 
 def latency_chart(lc: pd.DataFrame) -> go.Figure:
@@ -194,3 +194,27 @@ def regime_chart(res: Results, model: str, n: int = 20_000) -> go.Figure | None:
     fig.update_yaxes(title_text="bearish ← → bullish", range=[-1.15, 1.15])
     fig.update_xaxes(title_text="event")
     return _style(fig, "The model infers a regime it never sees", 360)
+
+
+def ltt_chart(rep: dict) -> go.Figure:
+    """Calibration loss rate per candidate threshold, which ones the test certified, and the test outcome."""
+    t = rep["trail"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=t["trade_fraction"], y=t["loss_rate"], mode="lines+markers", name="calibration loss rate",
+        line=dict(color=MUTED, width=2),
+        marker=dict(size=11, color=np.where(t["valid"], BLUE, SURFACE), line=dict(color=BLUE, width=2)),
+        customdata=np.c_[t["trades"], t["p_value"]],
+        hovertemplate="top %{x:.0%} by conviction<br>loss rate %{y:.0%}<br>%{customdata[0]} trades, "
+                      "p = %{customdata[1]:.3f}<extra></extra>"))
+    if rep["test_signal_rate"] > 0:
+        fig.add_trace(go.Scatter(x=[rep["test_signal_rate"]], y=[rep["test_loss_rate"]], mode="markers",
+                                 name="selected gate, test period",
+                                 marker=dict(size=14, symbol="diamond", color=ORANGE,
+                                             line=dict(color=SURFACE, width=2))))
+    fig.add_hline(y=rep["target"], line=dict(color=INK, width=1),
+                  annotation_text=f"target ≤ {rep['target']:.0%} losing trades", annotation_position="top left")
+    fig.update_xaxes(title_text="share of decisions traded", tickformat=".0%")
+    fig.update_yaxes(title_text="share of trades that lose money", tickformat=".0%", rangemode="tozero")
+    fig.update_layout(hovermode="closest")
+    return _style(fig, "Learn-then-Test: certified thresholds (filled) and what happened out of sample", 380)

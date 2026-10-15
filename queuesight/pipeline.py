@@ -10,10 +10,11 @@ from sklearn.inspection import permutation_importance
 from sklearn.metrics import accuracy_score, f1_score, log_loss
 
 from . import conformal as cp
-from .backtest import run_backtest
+from .backtest import run_backtest, trade_outcomes
 from .book import LOBData
 from .features import balanced_threshold, build_features, make_labels
 from .models import DeepLOBLite, boosted, logistic
+from .risk_control import LTTGate
 from .simulator import SimConfig, simulate
 
 WARMUP = 500
@@ -21,11 +22,13 @@ WARMUP = 500
 
 @dataclass
 class ExperimentConfig:
-    sim: SimConfig = field(default_factory=lambda: SimConfig(n_events=300_000))
+    sim: SimConfig = field(default_factory=lambda: SimConfig(n_events=600_000))
     horizons: tuple[int, ...] = (10, 50, 200)
     horizon: int = 200           # primary horizon for conformal + trading
     alpha: float = 0.25
     aci_gamma: float = 0.005
+    risk_target: float = 0.40    # LTT: max share of losing trades
+    risk_delta: float = 0.10     # LTT: allowed failure probability of that guarantee
     latency: int = 1             # events between decision and fill
     fee_ticks: float = 0.0
     train_stride: int = 2        # subsample training rows (they are autocorrelated)
@@ -160,13 +163,44 @@ def gated_signals(res: Results, model: str, alpha: float, method: str = "split")
     return cp.gate_signals(sets)
 
 
+def ltt_gate(res: Results, model: str | None = None, target: float | None = None,
+             latency: int | None = None, fee_ticks: float | None = None) -> LTTGate:
+    """Fit the Learn-then-Test gate on the calibration window."""
+    model = model or res.best_model
+    h = res.cfg.horizon
+    lat = res.cfg.latency if latency is None else latency
+    fee = res.cfg.fee_ticks if fee_ticks is None else fee_ticks
+    long_pnl, short_pnl = trade_outcomes(res.data, res.split.cal, h, lat, fee)
+    gate = LTTGate(target=res.cfg.risk_target if target is None else target, delta=res.cfg.risk_delta)
+    return gate.fit(res.primary.probs_cal[model], long_pnl, short_pnl, stride=h)
+
+
+def ltt_report(res: Results, model: str | None = None, target: float | None = None,
+               latency: int | None = None, fee_ticks: float | None = None) -> dict:
+    """Calibration trail plus the losing-trade rate the gate actually delivered on test."""
+    model = model or res.best_model
+    lat = res.cfg.latency if latency is None else latency
+    fee = res.cfg.fee_ticks if fee_ticks is None else fee_ticks
+    gate = ltt_gate(res, model, target, lat, fee)
+    sig = gate.signals(res.primary.probs_test[model])
+    long_pnl, short_pnl = trade_outcomes(res.data, res.split.test, res.cfg.horizon, lat, fee)
+    traded = sig != 0
+    pnl = np.where(sig > 0, long_pnl, short_pnl)[traded]
+    return {"target": gate.target, "delta": gate.delta, "lambda": gate.lam,
+            "trail": pd.DataFrame(gate.trail),
+            "test_signal_rate": float(traded.mean()),
+            "test_loss_rate": float((pnl < 0).mean()) if traded.any() else np.nan}
+
+
 def strategy_table(res: Results, model: str | None = None, alpha: float | None = None,
-                   latency: int | None = None, fee_ticks: float | None = None) -> pd.DataFrame:
+                   latency: int | None = None, fee_ticks: float | None = None,
+                   risk_target: float | None = None) -> pd.DataFrame:
     """Argmax vs confidence threshold vs conformal gate, all execution-aware."""
     model = model or res.best_model
     alpha = res.cfg.alpha if alpha is None else alpha
     lat = res.cfg.latency if latency is None else latency
     fee = res.cfg.fee_ticks if fee_ticks is None else fee_ticks
+    target = res.cfg.risk_target if risk_target is None else risk_target
     run, s, h = res.primary, res.split, res.cfg.horizon
     pc, pt = run.probs_cal[model], run.probs_test[model]
 
@@ -179,6 +213,8 @@ def strategy_table(res: Results, model: str | None = None, alpha: float | None =
         f"Confidence gate (tau={tau:.2f}, matched rate)": cp.threshold_signals(pt, tau),
         f"Conformal gate (alpha={alpha:.2f})": conf_sig,
         "Adaptive conformal gate": gated_signals(res, model, alpha, "aci"),
+        f"Risk-controlled gate (LTT, loss rate <= {target:.0%})":
+            ltt_gate(res, model, target, lat, fee).signals(pt),
     }
     rows = {}
     for name, sig in strategies.items():
@@ -201,7 +237,7 @@ def horizon_table(res: Results, model: str = "Gradient boosting") -> pd.DataFram
 
 
 def alpha_frontier(res: Results, model: str | None = None,
-                   alphas=np.round(np.arange(0.05, 0.41, 0.05), 2),
+                   alphas=(0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4),
                    latency: int | None = None, fee_ticks: float | None = None) -> pd.DataFrame:
     """Sweep the risk dial: how selectivity trades off against net edge per trade."""
     model = model or res.best_model

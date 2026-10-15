@@ -13,8 +13,17 @@ from pathlib import Path
 import pandas as pd
 
 from . import viz
-from .pipeline import (ExperimentConfig, alpha_frontier, conformal_report, horizon_table,
-                       latency_curve, regime_recovery, run_experiment, strategy_table)
+from .pipeline import (
+    ExperimentConfig,
+    alpha_frontier,
+    conformal_report,
+    horizon_table,
+    latency_curve,
+    ltt_report,
+    regime_recovery,
+    run_experiment,
+    strategy_table,
+)
 from .simulator import SimConfig
 
 CSS = """
@@ -43,7 +52,7 @@ def _markdown(df: pd.DataFrame, digits: int = 3) -> str:
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--events", type=int, default=300_000)
+    ap.add_argument("--events", type=int, default=600_000)
     ap.add_argument("--horizon", type=int, default=200)
     ap.add_argument("--alpha", type=float, default=0.25)
     ap.add_argument("--latency", type=int, default=1)
@@ -51,6 +60,7 @@ def main(argv=None) -> None:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--deep", action="store_true", help="also train the PyTorch DeepLOB-lite model")
     ap.add_argument("--out", default="results")
+    ap.add_argument("--png", metavar="DIR", help="also write the README charts as PNGs (needs kaleido)")
     a = ap.parse_args(argv)
 
     cfg = ExperimentConfig(sim=SimConfig(n_events=a.events, seed=a.seed), horizon=a.horizon,
@@ -65,17 +75,29 @@ def main(argv=None) -> None:
     fr = alpha_frontier(res, model)
     lat = latency_curve(res, model)
     reg = regime_recovery(res, model)
+    ltt = ltt_report(res, model)
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    figs = [
-        viz.book_heatmap(res), viz.horizon_chart(hz), viz.regime_chart(res, model),
-        viz.coverage_chart(cov, cfg.alpha), viz.rolling_coverage_chart(res, model, cfg.alpha),
-        viz.frontier_chart(fr), viz.equity_chart(res, model, cfg.alpha, cfg.latency, cfg.fee_ticks),
-        viz.latency_chart(lat), viz.importance_chart(res.importance),
-    ]
-    html_figs = [f.to_html(full_html=False, include_plotlyjs="cdn" if i == 0 else False)
-                 for i, f in enumerate(x for x in figs if x is not None)]
+    figs = {
+        "book": viz.book_heatmap(res), "horizon": viz.horizon_chart(hz), "regime": viz.regime_chart(res, model),
+        "coverage_bars": viz.coverage_chart(cov, cfg.alpha),
+        "coverage": viz.rolling_coverage_chart(res, model, cfg.alpha),
+        "frontier": viz.frontier_chart(fr),
+        "equity": viz.equity_chart(res, model, cfg.alpha, cfg.latency, cfg.fee_ticks),
+        "latency": viz.latency_chart(lat), "importance": viz.importance_chart(res.importance),
+        "ltt": viz.ltt_chart(ltt),
+    }
+    f_html, first = {}, True
+    for name, fig in figs.items():
+        f_html[name] = "" if fig is None else fig.to_html(full_html=False, include_plotlyjs="cdn" if first else False)
+        first = first and fig is None
+    if a.png:
+        Path(a.png).mkdir(parents=True, exist_ok=True)
+        for name in ("book", "horizon", "regime", "coverage", "frontier", "equity", "ltt"):
+            fig = figs[name]
+            if fig is not None:
+                fig.write_image(Path(a.png) / f"{name}.png", width=1000, height=fig.layout.height, scale=2)
 
     models_html = "".join(f"<h3>horizon = {h} events (flat band ±{r.threshold:.2f} ticks)</h3>"
                           + _table(r.metrics) for h, r in res.runs.items())
@@ -88,12 +110,16 @@ def main(argv=None) -> None:
 <p class="lede">Conformal-gated limit order book forecasting. {a.events:,} simulated events,
 primary horizon {cfg.horizon} events, α = {cfg.alpha}, latency {cfg.latency} event(s),
 fee {cfg.fee_ticks} ticks/side. Selected model (lowest calibration log-loss): <b>{model}</b>.</p>
-{html_figs[0]}
-<h2>1 · Accuracy is not edge</h2>{_table(hz)}{html_figs[1]}
-<h2>2 · Models</h2>{models_html}{reg_line}{html_figs[2]}
-<h2>3 · Conformal coverage</h2>{_table(cov)}{html_figs[3]}{html_figs[4]}
-<h2>4 · Trading the sets</h2>{_table(strat)}{html_figs[5]}{html_figs[6]}{html_figs[7]}
-<h2>5 · Features</h2>{html_figs[8]}
+{f_html['book']}
+<h2>1 · Accuracy is not edge</h2>{_table(hz)}{f_html['horizon']}
+<h2>2 · Models</h2>{models_html}{reg_line}{f_html['regime']}
+<h2>3 · Conformal coverage</h2>{_table(cov)}{f_html['coverage_bars']}{f_html['coverage']}
+<h2>4 · Risk control (Learn then Test)</h2>
+<p>Target ≤ {ltt['target']:.0%} losing trades at δ = {ltt['delta']}. Test losing-trade rate:
+<b>{ltt['test_loss_rate']:.1%}</b> on {ltt['test_signal_rate']:.0%} of decisions.</p>
+{_table(ltt['trail'])}{f_html['ltt']}
+<h2>5 · Trading</h2>{_table(strat)}{f_html['frontier']}{f_html['equity']}{f_html['latency']}
+<h2>6 · Features</h2>{f_html['importance']}
 </main></body></html>"""
     (out / "report.html").write_text(html)
 
@@ -101,6 +127,7 @@ fee {cfg.fee_ticks} ticks/side. Selected model (lowest calibration log-loss): <b
         "config": {"events": a.events, "horizon": cfg.horizon, "alpha": cfg.alpha,
                    "latency": cfg.latency, "fee_ticks": cfg.fee_ticks, "seed": a.seed},
         "best_model": model, "regime_recovery": reg,
+        "ltt": {k: v for k, v in ltt.items() if k != "trail"},
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     md = ["## Horizon vs tradability", _markdown(hz), "## Conformal coverage", _markdown(cov),
