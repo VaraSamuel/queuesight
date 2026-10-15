@@ -15,6 +15,7 @@ packages = ["queuesight"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 filterwarnings = ["ignore::UserWarning"]
 
 [tool.ruff]
